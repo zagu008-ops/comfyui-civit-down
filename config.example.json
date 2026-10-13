@@ -1,0 +1,9 @@
+{
+  "oauth_client_id": "c62bd385-135e-49cb-a132-a91f8e2a8ba5",
+  "pairing_key": "REPLACE_WITH_RANDOM_KEY_AT_LEAST_32_CHARACTERS",
+  "allowed_origins": [
+    "http://YOUR_SILLYTAVERN_HOST:8000"
+  ],
+  "lora_root": "/YOUR_COMFYUI_MODELS/loras",
+  "civitai_token": ""
+}

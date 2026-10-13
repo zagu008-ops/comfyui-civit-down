@@ -1,0 +1,12 @@
+[project]
+name = "comfyui-civit-down"
+version = "0.1.0"
+description = "Paired Civitai OAuth and verified LoRA downloads for ComfyUI"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.urls]
+Repository = "https://github.com/zagu008-ops/comfyui-civit-down"
+
+[tool.comfy]
+DisplayName = "ComfyUI Civit Down"
