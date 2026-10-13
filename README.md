@@ -1,10 +1,10 @@
 # ComfyUI Civit Down
 
-运行在 **ComfyUI 电脑**上的下载插件，供配对的酒馆调用。支持读取 Civitai 模型资料、网页账号授权、后台下载 LoRA、SHA256 校验和下载状态查询。当前版本为 `0.1.0` 链路测试版。
+在 **ComfyUI 电脑**上执行 Civitai 网页授权、LoRA 后台下载和 SHA256 校验。配合 Cosji 酒馆插件，将角色、作品、Trigger Words 与服装预设关联。当前为 `1.0.0-beta.1`，正式流程实现版；浏览器、手机和另一台电脑的安装验收须按 `DEVELOPMENT_PLAN.md` 完成后再发布稳定版。
 
-它是后台扩展，不新增工作流节点。安装后由 ComfyUI 自动注册 `/cosji-civit/` 接口。无需额外 pip 安装：使用 ComfyUI 已有的 `aiohttp`。
+本插件是 HTTP 后台扩展，不新增工作流节点。依赖 ComfyUI 已有的 `aiohttp`。
 
-## 安装
+## 安装与首次授权
 
 在目标电脑的 ComfyUI 目录执行：
 
@@ -12,90 +12,95 @@
 git clone https://github.com/zagu008-ops/comfyui-civit-down.git custom_nodes/comfyui-civit-down
 ```
 
-使用该 ComfyUI 的 Python 运行初始化脚本。将下面示例中的酒馆网址和 LoRA 路径替换为实际配置：
+重启 ComfyUI，在 **这台电脑的本机浏览器**打开：
+
+```text
+http://127.0.0.1:8188/cosji-civit/local
+```
+
+页面自动生成随机配对密钥；选择 ComfyUI 已配置的 LoRA 根目录，保存配置，点击连接 Civitai。在官方页面登录并批准，凭据留在这台电脑。仓库内置公开 Client ID `c62bd385-135e-49cb-a132-a91f8e2a8ba5`，它不包含任何账号权限。
+
+正式版采用授权码 + PKCE，回调监听随机本机端口、路径 `/oauth/callback`。自建 Public 应用需要登记 `http://127.0.0.1:18188/oauth/callback`；Civitai 的 loopback 匹配允许端口变化。请求权限为 UserRead + ModelsRead（scope 5）。普通注册应用不支持设备授权，不应把手机上的 localhost 当作 ComfyUI 电脑。
+
+手机和其他酒馆随后复用该电脑已保存的授权。更换 ComfyUI 电脑，需要在新电脑安装、授权并配对；不用复制私密配置。授权失效时在本机页面重新连接。OAuth 凭据过期会串行刷新。
+
+命令行初始化仍可使用：
 
 ```bash
-python custom_nodes/comfyui-civit-down/setup_config.py --origin http://192.168.1.10:8000 --lora-root /absolute/path/to/models/loras
+python custom_nodes/comfyui-civit-down/setup_config.py --lora-root /absolute/path/to/models/loras --origin http://192.168.1.10:8000
 ```
 
-Windows 路径示例：
+Windows LoRA 路径可填写 `D:\ComfyUI\models\loras`。同一 ComfyUI 只能安装一份本插件；从旧 `cosji-civit-download-helper` 升级时保留 `config.json` 和 `.state`，将旧副本移出 `custom_nodes` 后再启动。
 
-```powershell
-python custom_nodes/comfyui-civit-down/setup_config.py --origin http://192.168.1.10:8000 --lora-root "D:\ComfyUI\models\loras"
-```
+## 安装酒馆服务端接入
 
-可以重复传入 `--origin` 配对多个酒馆来源。LoRA 根目录必须是目标 ComfyUI 已配置的目录，包括 `extra_model_paths.yaml` 中的目录；助手在每次请求时核验。初始化会生成随机配对密钥，现有 Civitai 账号授权会保留。不要直接使用示例配置里的占位密钥。
+1. 将本仓库的 `sillytavern-server` 文件夹复制为 `SillyTavern/plugins/cosji-civit`。
+2. 检查 `plugins` 目录中的其他插件。启用服务端插件会运行该目录中有效插件的代码。
+3. 在酒馆 `config.yaml` 设置 `enableServerPlugins: true`，重启酒馆。
+4. 更新配套 [Cosji 酒馆插件](https://github.com/zagu008-ops/1008-stchu)。
+5. 在“角色 / 服装”填写 Civit 链接，点击“导入角色 / 服装并下载 LoRA”，首次填写目标电脑本机页面显示的配对密钥。
 
-重启 ComfyUI，并配置它监听自己的局域网 IP。例如：
+配对密钥存入酒馆服务器原生秘密存储，不进入普通角色/服装导出。浏览器后续只使用连接 ID。服务端代理使用酒馆原有登录与 CSRF，不能代理本机管理接口或任意外部网址。
+
+局域网目标须让 ComfyUI 监听自己的局域网地址，例如：
 
 ```bash
-python main.py --listen 127.0.0.1,192.168.1.20 --enable-cors-header http://192.168.1.10:8000
+python main.py --listen 127.0.0.1,192.168.1.20
 ```
 
-ComfyUI 桌面版可在启动参数中设置相同参数。IP 改变时更新监听参数及酒馆保存的目标地址。允许多个来源的助手配置不会自动修改 ComfyUI 的 CORS 设置；浏览器调用还需匹配 ComfyUI 的 CORS 配置。
+酒馆服务器必须能访问目标 ComfyUI。下载接入走酒馆服务器代理，不要求手机浏览器直连下载接口；原有生图链路的配置保持按酒馆插件使用。HTTP 局域网配对不能替代公网 HTTPS 与访问控制。
 
-**升级或迁移：同一个 ComfyUI 中只能安装一份本插件。** 如果之前安装过 `cosji-civit-download-helper`，停止 ComfyUI，把其中的 `config.json` 移到本目录，并将旧目录移出 `custom_nodes`，再启动，避免重复注册接口。
+## 使用流程
 
-## 酒馆使用
+1. 读取链接指定版本，或选择符合当前工作流模型家族的版本。Pony、Illustrious 和普通 SDXL 分开判断；未知兼容性须人工核对。
+2. 用酒馆当前配置的文本 LLM 识别公开标题、描述和 Trigger Words，自动查询作品名称候选。首版只支持同人单角色 LoRA。
+3. 统一核对角色目标、作品中文名、每套服装的词组、版本、文件、大小、目录和权重。可纠正名称/词组，选择已有角色或可选预览图。
+4. 确认后目标电脑下载。官方 SHA256 核验成功才创建正式角色与服装，保存后还会核对酒馆设置是否落盘。
+5. 已有服装跳过，同内容模型文件复用；当前应用的服装不变。
+6. 关闭页面后下载继续。重开导入窗口自动恢复未完成任务；失败可重试，任务运行时可取消。ComfyUI 重启将未完成任务标记为中断，允许重新下载。
 
-需要支持这些接口的酒馆插件版本。在“角色 / 服装”的 Civit 链接旁点击“下载 LoRA 到目标 ComfyUI”：
+识别只向配置的文本模型发送公开模型信息和公开作品候选，不发送聊天或角色卡。未配置文本 LLM、错误 JSON、编造触发词或不支持的模型类型会明确停止识别。
 
-1. 在本机查看 `config.json` 的 `pairing_key`，填写到下载窗口；仅在页面内存暂存，刷新后重新填写。
-2. 点击“通过 Civitai 网页授权”，在官方网页登录并确认，凭据自动保存到目标电脑。
-3. 读取模型资料，确认模型版本、基础模型、文件大小和保存子文件夹。
-4. 提交下载，等待目标电脑完成校验。返回的相对路径可用于 ComfyUI 的 LoRA 选择。
-
-默认子目录为 `Civit测试`；也可填写 `恋上换装娃娃` 等作品名。此版本不自动识别角色/作品、不创建服装、不自动判定基础模型兼容性。
-
-## 账号授权
-
-仓库内置公开的本插件 OAuth Client ID：`c62bd385-135e-49cb-a132-a91f8e2a8ba5`。示例配置和初始化脚本提供此值。用户仍须亲自批准账号授权；Client ID 不包含作者或任何用户的账号授权。
-
-设备授权使用 `https://auth.civitai.com`，无需公网回调地址。请求权限为 `UserRead + ModelsRead`，用于身份识别和模型下载；UserRead 是 Civitai 的基本必选权限。参考 [官方 OAuth 文档](https://github.com/civitai/civitai/blob/main/docs/auth/oauth-developer-docs.md)。如果应用尚未获准使用设备授权，接口会返回明确错误，管理员需在 Civitai 完成应用设置；当前尚未完成真实用户批准后的下载验证。
-
-授权完成后，服务端保存访问凭据和刷新凭据，过期时自动刷新。也支持 `/token` 接口手动配置个人 Token，作为网页授权不可用时的备用。自行注册的应用可用 `--client-id` 覆盖默认 ID；必须支持 Public 设备授权及上述权限。
-
-## 数据放在哪里
+## 数据归属
 
 | 数据 | 保存位置 |
 | --- | --- |
-| OAuth Client ID | GitHub 示例配置，可公开 |
-| 配对密钥、Civitai Token、刷新凭据 | ComfyUI 电脑的本地 `config.json` |
-| LoRA 文件 | ComfyUI 已配置的 LoRA 根目录/作品子目录 |
-| 链接、角色、服装、Trigger Words、预览关联 | 酒馆的预设配置，由酒馆插件管理 |
-| 当前下载进度与任务状态 | ComfyUI 服务内存；重启后清空 |
+| 公开 OAuth Client ID | 代码与配置示例 |
+| 配对密钥、Civitai 访问/刷新凭据 | ComfyUI 本地 `config.json` |
+| 下载任务、状态、文件元数据 | ComfyUI 本地 `.state/jobs.sqlite3` |
+| 模型 | ComfyUI 已配置 LoRA 根目录 / 作品名称 / 原始文件名 |
+| 配对凭据 | 酒馆服务器原生 `secrets.json`（按用户隔离） |
+| 连接记录、待导入计划 | 酒馆用户数据目录 `cosji-civit-connections.json`、`cosji-civit-imports.json` |
+| 角色、服装、触发词、LoRA 相对路径 | 酒馆插件设置 |
 
-`config.json` 已加入 `.gitignore`。它包含凭据，不要提交、分享或加入普通预设导出。初始化在支持 POSIX 权限的平台设置为当前用户读写；Windows 上应额外通过 NTFS 权限限制读取。复制到新电脑时建议重新生成配对密钥、重新授权；不要把原电脑的私密配置当成安装模板。
+`config.json`、`.state`、临时模型文件均被 Git 忽略。不要分享私密配置。POSIX 下私密文件权限为 600；Windows 上通过 NTFS 权限限制访问。
 
-当前局域网 HTTP 会在网络上传输配对凭据，跨公网使用需要 HTTPS。不要将这些接口未经保护地暴露到公网。
+## 接口与边界
 
-## 接口
-
-所有接口要求 `Authorization: Bearer <pairing_key>`；浏览器的 Origin 还必须在本机配置的来源列表中。所有 JSON 响应均不会返回 Token 原文。
+下载接口前缀 `/cosji-civit/`，需 `Authorization: Bearer <pairing_key>`。带 Origin 的调用须匹配已配置来源，本机同源调用除外。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| POST | `/cosji-civit/inspect` | `{url}`，读取模型及可下载版本 |
-| POST | `/cosji-civit/download` | `{url, versionId, fileId, folder}`，提交任务 |
-| GET | `/cosji-civit/jobs/{id}` | 查询下载任务 |
-| POST | `/cosji-civit/oauth/start` | 开始网页设备授权 |
-| GET | `/cosji-civit/oauth/status/{id}` | 查询授权状态 |
-| POST | `/cosji-civit/token` | `{token}`，配置备用 Token |
+| GET | `/capabilities` | 协议/版本、授权状态和目录 |
+| POST | `/inspect` | `{url}`，公开模型与版本资料 |
+| POST | `/download` | `{url, versionId, fileId, folder}`，预约持久任务 |
+| GET | `/jobs`、`/jobs/{id}` | 查询持久状态 |
+| POST | `/jobs/{id}/cancel`、`/jobs/{id}/retry` | 取消/重试 |
+| GET | `/local`、`/local/config` | 仅本机配置页面及本机配对信息 |
+| POST | `/local/config`、`/oauth/start`、`/token` | 仅本机配置/PKCE 授权/备用 Token |
 
-## 限制与验证
+- 主 safetensors 文件、官方 SHA256、最多 2 GiB、一次一个活动下载。
+- 只接受单层作品目录，拒绝绝对路径、穿越、符号链接越界、Windows 保留名称。
+- 发布模型文件时不覆盖；同名异内容增加哈希后缀。
+- 只对 Civitai API 主域发送账号认证，不对 B2/R2 存储发送认证头。
+- 限定官方存储跳转；429/5xx 与网络暂时故障最多尝试三次，取消等待临时文件清理。
+- 不承诺断点续传。后台完成后酒馆界面必须再次打开才能保存服装；下载服务不会直接修改酒馆预设。
 
-- 只支持有 SHA256 的主 `.safetensors` LoRA 文件，单文件最多 2 GiB，每次一个下载任务。
-- 只允许单层子文件夹，不接受绝对路径、路径穿越或指向外部的符号链接。
-- 相同文件复用；同名不同内容以哈希后缀区分，不覆盖已有文件。
-- 临时文件校验通过后才发布为模型文件；失败清理临时文件。
-- Civitai 认证头只发送给 Civitai 域名，不发送给下载存储域名。
-- 手机关闭页面后下载继续；ComfyUI 重启会丢失任务状态。目前无断点续传、任务取消和自动重试。
-- 下载跳转限于 Civitai、R2 与指定 Civitai 存储域名，遇到其他域名会停止。
-
-测试命令（使用 ComfyUI 环境的 Python）：
+验证命令：
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
+node sillytavern-server/test.cjs
 ```
 
-测试覆盖下载与复用、哈希失败清理、不覆盖冲突文件、目录逃逸、认证和来源限制，以及 OAuth 等待、拒绝、限流和凭据刷新。文件传输及 OAuth 成功路径使用测试响应；不代表已验证真实账号授权和实际模型下载。
+真实本地授权、218 MiB 模型下载、官方 SHA256、ComfyUI 列表和酒馆代理读取已验证，证据见 `CHAIN_VALIDATION.md`。安装验收与未完成项见 `DEVELOPMENT_PLAN.md`。OAuth 行为参照 [Civitai 官方源码和文档](https://github.com/civitai/civitai/tree/main/apps/auth)。

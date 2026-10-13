@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Civit 下载管理</title>
+<style>body{font:16px system-ui;background:#171923;color:#eee;max-width:760px;margin:32px auto;padding:0 20px}label{display:block;margin:18px 0}input,select,textarea,button{font:inherit;padding:10px;border:1px solid #586079;border-radius:6px;background:#242938;color:#fff}input,select,textarea{box-sizing:border-box;width:100%}button{cursor:pointer;margin:4px 10px 4px 0}p{line-height:1.6}#status{white-space:pre-wrap;color:#a9dcff}small{color:#aab2c5}</style>
+<h1>Civit 下载管理</h1><p>在这台 ComfyUI 电脑完成一次账号授权。手机和酒馆随后使用这台电脑的已授权状态。</p>
+<label>LoRA 根目录<select id="root"></select></label><label>允许直接访问的酒馆来源（每行一个，可留空）<textarea id="origins" rows="3"></textarea></label>
+<button id="save">保存设置</button><button id="authorize">连接 Civitai 账号</button><p id="account"></p>
+<label>酒馆配对密钥<input id="key" type="password" readonly></label><button id="copy">复制配对密钥</button><small>在酒馆中配对一次。不要把密钥放入普通预设或分享文件。</small>
+<p id="status" role="status"></p><p id="authLink"></p>
+<script>
+let config;const el=id=>document.getElementById(id);const status=text=>el('status').textContent=text;
+async function request(route,body){const r=await fetch('/cosji-civit/'+route,{method:body?'POST':'GET',headers:{...(config?{Authorization:'Bearer '+config.pairingKey}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});let d;try{d=await r.json()}catch{throw Error('请求失败：HTTP '+r.status)}if(!r.ok)throw Error(d.error||'HTTP '+r.status);return d}
+async function load(){config=await request('local/config');el('root').replaceChildren(...config.roots.map(p=>new Option(p,p,p===config.root,p===config.root)));el('origins').value=config.allowedOrigins.join('\n');el('key').value=config.pairingKey;el('account').textContent=config.connected?'Civitai 已连接':'尚未连接 Civitai'}
+el('save').onclick=async()=>{try{await request('local/config',{root:el('root').value,allowedOrigins:el('origins').value.split('\n').map(s=>s.trim()).filter(Boolean)});status('设置已保存')}catch(e){status(e.message)}};
+el('copy').onclick=async()=>{try{await navigator.clipboard.writeText(config.pairingKey);status('配对密钥已复制')}catch{el('key').type='text';el('key').select();status('请手动复制已选中的密钥')}};
+el('authorize').onclick=async()=>{const popup=window.open('about:blank','_blank');el('authorize').disabled=true;try{const a=await request('oauth/start',{});if(popup){popup.opener=null;popup.location.href=a.url}const link=document.createElement('a');link.href=a.url;link.textContent='打开本机授权页';link.target='_blank';link.rel='noopener';el('authLink').replaceChildren(link);status('请在 Civitai 官方页面登录并确认');const poll=async()=>{try{const d=await request('oauth/status/'+a.id);if(d.state==='done'){status('授权完成，手机和酒馆可以使用此电脑下载');el('authorize').disabled=false;await load()}else if(d.state==='failed'){status(d.error);el('authorize').disabled=false}else setTimeout(poll,2000)}catch(e){status(e.message);el('authorize').disabled=false}};poll()}catch(e){popup?.close();status(e.message);el('authorize').disabled=false}};
+load().catch(e=>status(e.message));
+</script></html>

@@ -19,6 +19,7 @@ server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(route
 sys.modules['server'] = server
 spec = importlib.util.spec_from_file_location('download_helper', Path(__file__).resolve().parents[1] / '__init__.py')
 m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 
 
@@ -57,6 +58,67 @@ class HelperTests(unittest.IsolatedAsyncioTestCase):
         Session.response = response
         with patch.object(m.aiohttp, 'ClientSession', Session):
             await m.download(self.job, {'civitai_token': 'test-secret'}, self.root, 'civitai.red', file or self.file)
+    async def test_duplicate_submission_retains_live_progress(self):
+        from job_store import JobStore
+        store = JobStore(self.root / 'jobs.sqlite3')
+        snapshot = {'root': str(self.root), 'folder': self.job['folder'], 'file': self.file, 'host': 'civitai.com', 'modelId': '1'}
+        saved, _ = store.reserve(snapshot)
+        live = dict(saved, state='downloading', received=3)
+        request = types.SimpleNamespace(content_length=100, json=AsyncMock(return_value={'url': 'https://civitai.com/models/1', 'folder': self.job['folder'], 'versionId': 2, 'fileId': 3}))
+        with patch.object(m, 'authorize', return_value=({}, self.root)), patch.object(m, 'fresh_config', AsyncMock(return_value={})), patch.object(m, 'get_store', return_value=store), patch.object(m.aiohttp, 'ClientSession', Session), patch.object(m, 'metadata', AsyncMock(return_value={})), patch.object(m, 'model_files', return_value=[self.file]), patch.dict(m.JOBS, {saved['id']: live}):
+            response = await m.start(request)
+            self.assertIs(m.JOBS[saved['id']], live)
+        self.assertEqual(json.loads(response.text)['received'], 3)
+
+    async def test_local_admin_rejects_remote_and_cross_origin(self):
+        base = {'remote': '127.0.0.1', 'host': '127.0.0.1:8188', 'scheme': 'http', 'headers': {}}
+        m.require_local(types.SimpleNamespace(**base))
+        for changed in ({'remote': '192.168.1.2'}, {'host': 'attacker.invalid:8188'}, {'headers': {'Origin': 'https://attacker.invalid'}}, {'headers': {'Sec-Fetch-Site': 'cross-site'}}):
+            with self.assertRaises(m.web.HTTPForbidden):
+                m.require_local(types.SimpleNamespace(**{**base, **changed}))
+
+    async def test_invalid_request_body_is_rejected(self):
+        for value in ([], None, 'not-object'):
+            request = types.SimpleNamespace(content_length=20, json=AsyncMock(return_value=value))
+            with self.assertRaises(ValueError):
+                await m.request_object(request)
+        request = types.SimpleNamespace(content_length=20000, json=AsyncMock(return_value={}))
+        with self.assertRaises(ValueError):
+            await m.request_object(request)
+        request.json.assert_not_called()
+
+    async def test_retry_active_does_not_delete_partial(self):
+        from job_store import JobStore
+        store = JobStore(self.root / 'jobs.sqlite3')
+        snapshot = {'root': str(self.root), 'folder': self.job['folder'], 'file': self.file, 'host': 'civitai.com', 'modelId': 1}
+        job, _ = store.reserve(snapshot)
+        folder = self.root / job['folder']; folder.mkdir()
+        partial = folder / ('.' + job['id'] + '.part'); partial.write_bytes(b'ongoing')
+        request = types.SimpleNamespace(match_info={'id': job['id']})
+        with patch.object(m, 'authorize', return_value=({}, self.root)), patch.object(m, 'fresh_config', AsyncMock(return_value={})), patch.object(m, 'get_store', return_value=store):
+            response = await m.retry_job(request)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(partial.read_bytes(), b'ongoing')
+
+    async def test_cancel_waits_for_worker_cleanup(self):
+        from job_store import JobStore
+        store = JobStore(self.root / 'jobs.sqlite3')
+        job, _ = store.reserve({'root': str(self.root), 'folder': self.job['folder'], 'file': self.file, 'host': 'civitai.com', 'modelId': 1})
+        cleaned = []
+        async def worker():
+            try:
+                await asyncio.sleep(100)
+            finally:
+                cleaned.append(True)
+        task = asyncio.create_task(worker()); await asyncio.sleep(0)
+        request = types.SimpleNamespace(match_info={'id': job['id']})
+        with patch.dict(m.DOWNLOAD_TASKS, {job['id']: task}), patch.object(m, 'authorize', return_value=({}, self.root)), patch.object(m, 'get_store', return_value=store):
+            response = await m.cancel_job(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(cleaned, [True])
+        self.assertTrue(task.done())
+        self.assertEqual(store.get(job['id'])['state'], 'cancelled')
+
     async def test_verified_download_and_reuse(self):
         await self.run_download(Response(b'model'))
         self.assertEqual(self.job['state'], 'done')
@@ -91,6 +153,11 @@ class HelperTests(unittest.IsolatedAsyncioTestCase):
         await self.run_download(Response(b'', status=302, headers={'Location': 'https://127.0.0.1/private'}))
         self.assertEqual(len(Session.calls), 1)
         self.assertEqual(self.job['state'], 'failed')
+    async def test_official_storage_host_and_token_boundary(self):
+        self.assertTrue(m.allowed_download('https://b2.civitai.com/file?signature=dummy'))
+        self.assertFalse(m.allowed_download('https://b2.civitai.com.attacker.invalid/file'))
+        self.assertNotIn('b2.civitai.com', m.HOSTS, 'account token must not be sent to storage')
+
     async def test_pairing_and_paths(self):
         cfg={'pairing_key':'x'*32,'allowed_origins':['http://phone:8000'],'lora_root':str(self.root)}
         request=types.SimpleNamespace(headers={'Authorization':'Bearer '+ 'x'*32,'Origin':'http://phone:8000'})
@@ -105,32 +172,22 @@ class HelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.parse_link('https://civitai.red/models/1505483/character')[1], '1505483')
         with self.assertRaises(ValueError): m.parse_link('https://localhost/models/1')
 
-    async def test_oauth_wait_backoff_and_save_without_exposing_tokens(self):
-        auth={'id':'auth-test','state':'pending','clientId':'our-app'}
-        cfg_path=self.root/'config.json'
-        cfg_path.write_text(json.dumps({'pairing_key':'x'*32,'oauth_client_id':'our-app'}))
-        responses=[{'error':'authorization_pending'},{'error':'rate_limited'},
-                   {'access_token':'private-access','refresh_token':'private-refresh','expires_in':3600,'scope':'5'}]
-        with patch.object(m,'CONFIG',cfg_path), patch.object(m.aiohttp,'ClientSession',Session), patch.object(m,'oauth_post',AsyncMock(side_effect=responses)), patch.object(m.asyncio,'sleep',AsyncMock()) as sleep:
-            await m.poll_auth(auth,{'device_code':'private-device-code','interval':5,'expires_in':900})
-        self.assertEqual(auth['state'],'done')
-        self.assertEqual([call.args[0] for call in sleep.call_args_list],[5,5,10])
-        saved=json.loads(cfg_path.read_text())
-        self.assertEqual(saved['oauth_refresh_token'],'private-refresh')
-        self.assertNotIn('private-access',json.dumps(auth))
-        self.assertEqual(cfg_path.stat().st_mode & 0o777,0o600)
+    async def test_missing_permission_rejected(self):
+        with self.assertRaises(ValueError): m.store_oauth({'access_token':'a','refresh_token':'r','scope':['1']})
 
-    async def test_oauth_denial_and_missing_permission(self):
-        auth={'id':'auth-test','state':'pending','clientId':'our-app'}
-        with patch.object(m.aiohttp,'ClientSession',Session),patch.object(m,'oauth_post',AsyncMock(return_value={'error':'access_denied'})),patch.object(m.asyncio,'sleep',AsyncMock()):
-            await m.poll_auth(auth,{'device_code':'code','expires_in':900})
-        self.assertEqual(auth['state'],'failed')
-        with self.assertRaises(ValueError):m.store_oauth({'access_token':'a','refresh_token':'r','scope':'1'})
+    async def test_refresh_is_serialized(self):
+        cfg_path=self.root/'config.json'
+        cfg_path.write_text(json.dumps({'oauth_client_id':'our-app','civitai_token':'old-access','oauth_refresh_token':'old-refresh','oauth_expires_at':0}))
+        response={'access_token':'new-access','refresh_token':'new-refresh','scope':['5'],'expires_in':3600}
+        with patch.object(m,'CONFIG',cfg_path),patch.object(m,'REFRESH_LOCK',asyncio.Lock()),patch.object(m.aiohttp,'ClientSession',Session),patch.object(m,'oauth_post',AsyncMock(return_value=response)) as post:
+            results=await asyncio.gather(m.fresh_config(),m.fresh_config())
+        self.assertEqual(post.await_count,1)
+        self.assertEqual(results[0]['civitai_token'],results[1]['civitai_token'])
 
     async def test_oauth_refresh_rotation(self):
         cfg_path=self.root/'config.json'
         cfg_path.write_text(json.dumps({'oauth_client_id':'our-app','civitai_token':'old-access','oauth_refresh_token':'old-refresh','oauth_expires_at':0}))
-        response={'access_token':'new-access','refresh_token':'new-refresh','scope':'5','expires_in':3600}
+        response={'access_token':'new-access','refresh_token':'new-refresh','scope':['5'],'expires_in':3600}
         with patch.object(m,'CONFIG',cfg_path),patch.object(m.aiohttp,'ClientSession',Session),patch.object(m,'oauth_post',AsyncMock(return_value=response)) as post:
             cfg=await m.fresh_config()
         self.assertEqual(cfg['oauth_refresh_token'],'new-refresh')
